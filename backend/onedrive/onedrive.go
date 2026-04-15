@@ -2529,7 +2529,12 @@ func (o *Object) uploadFragment(ctx context.Context, url string, start int64, to
 			return true, fmt.Errorf("retry this chunk skipping %d bytes: %w", skip, err)
 		} else if err != nil && resp != nil && resp.StatusCode == http.StatusNotFound {
 			fs.Debugf(o, "Received 404 error: assuming eventual consistency problem with session - retrying chunk: %v", err)
-			time.Sleep(5 * time.Second) // a little delay to help things along
+			// Wait a bit for eventual consistency, but respect context cancellation
+			select {
+			case <-time.After(5 * time.Second):
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
 			return true, err
 		}
 		if err != nil {
@@ -2545,7 +2550,11 @@ func (o *Object) uploadFragment(ctx context.Context, url string, start int64, to
 			info = &api.Item{}
 			return false, json.Unmarshal(body, info)
 		}
-		return false, nil
+		if resp.StatusCode == 202 {
+			// Intermediate chunk accepted — continue to next chunk
+			return false, nil
+		}
+		return false, fmt.Errorf("unexpected status code %d during chunk upload", resp.StatusCode)
 	})
 	return info, err
 }
@@ -2582,10 +2591,14 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, src fs.Objec
 	}
 	uploadURL := session.UploadURL
 
-	// Cancel the session if something went wrong
+	// Cancel the session if something went wrong. Use a background
+	// context with a timeout since the parent ctx may already be
+	// cancelled (which is why the upload failed).
 	defer atexit.OnError(&err, func() {
 		fs.Debugf(o, "Cancelling multipart upload: %v", err)
-		cancelErr := o.cancelUploadSession(ctx, uploadURL)
+		cancelCtx, cancelFn := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelFn()
+		cancelErr := o.cancelUploadSession(cancelCtx, uploadURL)
 		if cancelErr != nil {
 			fs.Logf(o, "Failed to cancel multipart upload: %v (upload failed due to: %v)", cancelErr, err)
 		}
