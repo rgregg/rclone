@@ -47,7 +47,7 @@ const (
 	rcloneClientID              = "b15665d9-eda6-4092-8539-0eec376afd59"
 	rcloneEncryptedClientSecret = "_JUdzh3LnKNqSPcf4Wu5fgMFIQOI8glZu_akYgR8yf6egowNBg-R"
 	minSleep                    = 10 * time.Millisecond
-	maxSleep                    = 2 * time.Second
+	maxSleep                    = 60 * time.Second
 	decayConstant               = 2 // bigger for slower decay, exponential
 	configDriveID               = "drive_id"
 	configDriveType             = "drive_type"
@@ -897,18 +897,19 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 			}
 		case 429, 503: // Too Many Requests, Server Too Busy
 			// see https://docs.microsoft.com/en-us/sharepoint/dev/general-development/how-to-avoid-getting-throttled-or-blocked-in-sharepoint-online
+			retry = true
 			if values := resp.Header["Retry-After"]; len(values) == 1 && values[0] != "" {
 				retryAfter, parseErr := strconv.Atoi(values[0])
 				if parseErr != nil {
 					fs.Debugf(nil, "Failed to parse Retry-After: %q: %v", values[0], parseErr)
 				} else {
 					duration := time.Second * time.Duration(retryAfter)
-					retry = true
 					err = pacer.RetryAfterError(err, duration)
 					fs.Debugf(nil, "Too many requests. Trying again in %d seconds.", retryAfter)
 				}
 			}
 		case 504: // Gateway timeout
+			retry = true
 			gatewayTimeoutError.Do(func() {
 				fs.Errorf(nil, "%v: upload chunks may be taking too long - try reducing --onedrive-chunk-size or decreasing --transfers", err)
 			})
@@ -1658,13 +1659,17 @@ func (f *Fs) waitForJob(ctx context.Context, location string, o *Object) error {
 		var resp *http.Response
 		var err error
 		var body []byte
+		opts := rest.Opts{
+			Method:  "GET",
+			RootURL: location,
+		}
 		err = f.pacer.Call(func() (bool, error) {
-			resp, err = http.Get(location)
+			resp, err = f.unAuth.Call(ctx, &opts)
 			if err != nil {
-				return fserrors.ShouldRetry(err), err
+				return shouldRetry(ctx, resp, err)
 			}
 			body, err = rest.ReadBody(resp)
-			return fserrors.ShouldRetry(err), err
+			return shouldRetry(ctx, resp, err)
 		})
 		if err != nil {
 			return err
