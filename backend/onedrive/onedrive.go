@@ -140,6 +140,17 @@ func init() {
 				},
 			},
 		}, {
+			Name: "api_endpoint",
+			Help: `Override the API endpoint URL.
+
+When set, this overrides the API base URL derived from the region setting.
+Use this to point rclone at a SharePoint-specific endpoint, for example
+"https://yourtenant.sharepoint.com/_api/v2.0".
+
+Leave blank to use the default Microsoft Graph endpoint for the configured region.`,
+			Default:  "",
+			Advanced: true,
+		}, {
 			Name: "upload_cutoff",
 			Help: `Cutoff for switching to chunked upload.
 
@@ -468,10 +479,15 @@ isn't always desirable to set the permissions from the metadata.
 	})
 }
 
-// Get the region and graphURL from the config
+// Get the region and graphURL from the config.
+// If api_endpoint is set, it overrides the region-derived URL.
 func getRegionURL(m configmap.Mapper) (region, graphURL string) {
 	region, _ = m.Get("region")
-	graphURL = graphAPIEndpoint[region] + "/v1.0"
+	if apiEndpoint, _ := m.Get("api_endpoint"); apiEndpoint != "" {
+		graphURL = strings.TrimRight(apiEndpoint, "/")
+	} else {
+		graphURL = graphAPIEndpoint[region] + "/v1.0"
+	}
 	return region, graphURL
 }
 
@@ -762,6 +778,7 @@ Examples:
 // Options defines the configuration for this backend
 type Options struct {
 	Region                  string               `config:"region"`
+	APIEndpoint             string               `config:"api_endpoint"`
 	UploadCutoff            fs.SizeSuffix        `config:"upload_cutoff"`
 	ChunkSize               fs.SizeSuffix        `config:"chunk_size"`
 	DriveID                 string               `config:"drive_id"`
@@ -801,6 +818,7 @@ type Fs struct {
 	driveID      string             // ID to use for querying Microsoft Graph
 	driveType    string             // https://developer.microsoft.com/en-us/graph/docs/api-reference/v1.0/resources/drive
 	hashType     hash.Type          // type of the hash we are using
+	graphURL     string             // API base URL (from region or api_endpoint override)
 }
 
 // Object describes a OneDrive object
@@ -1068,7 +1086,13 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		return nil, errors.New("unable to get drive_id and drive_type - if you are upgrading from older versions of rclone, please run `rclone config` and re-configure this backend")
 	}
 
-	rootURL := graphAPIEndpoint[opt.Region] + "/v1.0" + "/drives/" + opt.DriveID
+	var apiBase string
+	if opt.APIEndpoint != "" {
+		apiBase = strings.TrimRight(opt.APIEndpoint, "/")
+	} else {
+		apiBase = graphAPIEndpoint[opt.Region] + "/v1.0"
+	}
+	rootURL := apiBase + "/drives/" + opt.DriveID
 
 	oauthConfig, err := makeOauthConfig(ctx, opt)
 	if err != nil {
@@ -1088,6 +1112,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		root:      root,
 		opt:       *opt,
 		ci:        ci,
+		graphURL:  apiBase,
 		driveID:   opt.DriveID,
 		driveType: opt.DriveType,
 		srv:       rest.NewClient(oAuthClient).SetRoot(rootURL),
@@ -2738,7 +2763,7 @@ func (o *Object) ID() string {
 // and returns itemID, driveID, rootURL.
 // Such a normalized ID can come from (*Item).GetID()
 func (f *Fs) parseNormalizedID(ID string) (string, string, string) {
-	rootURL := graphAPIEndpoint[f.opt.Region] + "/v1.0/drives"
+	rootURL := f.graphURL + "/drives"
 	if strings.Contains(ID, "#") {
 		s := strings.Split(ID, "#")
 		return s[1], s[0], rootURL
@@ -2933,7 +2958,7 @@ func (f *Fs) changeNotifyNextChange(ctx context.Context, token string) (delta ap
 }
 
 func (f *Fs) buildDriveDeltaOpts(token string) rest.Opts {
-	rootURL := graphAPIEndpoint[f.opt.Region] + "/v1.0/drives"
+	rootURL := f.graphURL + "/drives"
 
 	return rest.Opts{
 		Method:     "GET",
